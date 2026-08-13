@@ -87,9 +87,13 @@
 
 const PROXY_BUILDERS = [
   u => u, // 직접 호출(브라우저/환경에 따라 CORS가 열려 있으면 프록시 없이 바로 성공)
+  u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
   u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
   u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
-  u => `https://thingproxy.freeboard.io/fetch/${u}`,
+  u => `https://cors.eu.org/${u}`,
+  // 위 공개 프록시들은 무료 데모 서비스라 예고 없이 막히거나 다운될 수 있다.
+  // 계속 실패하면 README의 안내대로 Cloudflare Worker 등으로 직접 프록시를 만들어
+  // 이 배열 맨 앞에 추가하는 것이 가장 안정적이다.
 ];
 
 const STOCKS=[
@@ -235,7 +239,7 @@ async function fetchViaProxy(targetUrl){
  for(const build of PROXY_BUILDERS){
   const reqUrl=build(targetUrl);
   try{
-   const res=await fetchWithTimeout(reqUrl,7000);
+   const res=await fetchWithTimeout(reqUrl,8000);
    if(!res.ok)throw new Error("HTTP "+res.status);
    const data=await res.json();
    if(data)return data;
