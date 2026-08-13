@@ -81,8 +81,14 @@
  * "KOSPI 200 대표 종목" 집합(135종목)이며, 최신 공식 편입 종목/비중과
  * 완전히 일치하지는 않을 수 있습니다. 정확한 최신 구성종목이 필요하면
  * KRX 정보데이터시스템(data.krx.co.kr)에서 다운로드한 목록으로
- * STOCKS 배열을 교체하세요. weight 값은 트리맵 크기 배분을 위한
- * 대략적인 상대값이며 실시간 시가총액이 아닙니다.
+ * STOCKS 배열을 교체하세요.
+ *
+ * 트리맵 상자 크기: 네이버 시세 응답에 포함된 실시간 시가총액
+ * (marketValueFullRaw, 원 단위)을 그대로 사용합니다. 즉 삼성전자·SK하이닉스처럼
+ * 실제로 KOSPI 시총 비중이 큰 종목은 상자도 그만큼 크게 그려지고, 매 갱신마다
+ * 최신 시총으로 다시 계산됩니다. 아래 각 종목의 w 값은 시총 데이터가 아직
+ * 로딩되지 않았을 때(첫 렌더링)나 해당 종목만 조회에 실패했을 때 쓰는
+ * 임시 대체값일 뿐, 실제 크기 산정에는 쓰이지 않습니다.
  * ---------------------------------------------------------------------- */
 
 const PROXY_BUILDERS = [
@@ -188,6 +194,19 @@ const STOCKS=[
 const colorScale=d3.scaleLinear().domain([-4,-1.5,0,1.5,4]).range(["#1565c0","#1b3a5c","#2b2b30","#7a2320","#e0392b"]).clamp(true);
 (function(){const bar=document.getElementById("legendBar");for(let p=-4;p<=4;p+=2/3){const d=document.createElement("div");d.style.background=colorScale(p);bar.appendChild(d);}})();
 
+// 1 weight당 대략 이 정도 시총(원)으로 간주 — 데이터 로딩 전 첫 화면이나, 그 종목만
+// 조회에 실패했을 때만 쓰이는 임시 스케일이다(1조 원/weight).실제 크기는 항상
+// quotes[].cap(marketValueFullRaw)이 로드되는 즉시 그 값으로 대체된다.
+const FALLBACK_CAP_PER_WEIGHT=1e12;
+
+function formatCap(krw){
+ if(krw==null||Number.isNaN(krw))return null;
+ const jo=Math.floor(krw/1e12);
+ const eok=Math.floor((krw%1e12)/1e8);
+ if(jo>0)return `${jo.toLocaleString("ko-KR")}조 ${eok.toLocaleString("ko-KR")}억원`;
+ return `${eok.toLocaleString("ko-KR")}억원`;
+}
+
 const tip=document.getElementById("tip"),chartEl=document.getElementById("chart");
 let tipTimer=null;
 
@@ -197,7 +216,9 @@ function render(quotes){
  d3.select("#chart svg").remove();
  const svg=d3.select("#chart").append("svg").attr("width",w).attr("height",h);
  const bySector=d3.group(STOCKS,d=>d.sector);
- const root=d3.hierarchy({children:Array.from(bySector,([sector,items])=>({sector,children:items}))}).sum(d=>d.w).sort((a,b)=>b.value-a.value);
+ // 상자 크기 = 실시간 시가총액(marketValueFullRaw). 아직 로딩 전이거나 그 종목만
+ // 조회 실패한 경우엔 STOCKS의 정적 w 값을 대략적인 시총 스케일로 환산해 대체한다.
+ const root=d3.hierarchy({children:Array.from(bySector,([sector,items])=>({sector,children:items}))}).sum(d=>{const q=quotes[d.c];return(q&&q.cap!=null&&!Number.isNaN(q.cap))?q.cap:d.w*FALLBACK_CAP_PER_WEIGHT;}).sort((a,b)=>b.value-a.value);
  d3.treemap()
    .tile(portrait ? d3.treemapSliceDice : d3.treemapSquarify)
    .size([w,h]).paddingOuter(4).paddingTop(20).paddingInner(1.5).round(true)(root);
@@ -208,8 +229,8 @@ function render(quotes){
   g.append("text").attr("x",bw/2).attr("y",bh/2-(bh>32?fs*0.25:0)).attr("text-anchor","middle").attr("dominant-baseline","middle").attr("fill","#fff").attr("font-weight",700).attr("font-size",fs).text(d.data.n);
   if(bh>32&&dp!=null){g.append("text").attr("x",bw/2).attr("y",bh/2+fs*0.75).attr("text-anchor","middle").attr("dominant-baseline","middle").attr("fill","rgba(255,255,255,0.85)").attr("font-size",Math.max(8,fs*0.5)).text((dp>=0?"+":"")+dp.toFixed(2)+"%");}});
  cell.on("click",function(event,d){
-  const q=quotes[d.data.c];const dp=q&&q.dp!=null?q.dp:null;const price=q&&q.c!=null?q.c:null;
-  tip.innerHTML=`<div class="t-sym">${d.data.n}</div><div class="t-name">${d.data.c}</div>`+(price!=null?`<div class="t-row"><span>현재가</span><span>${price.toLocaleString("ko-KR")}원</span></div>`:"")+(dp!=null?`<div class="t-row"><span>등락률</span><span style="color:${dp>=0?'#e0392b':'#1565c0'}">${dp>=0?'+':''}${dp.toFixed(2)}%</span></div>`:`<div class="t-row"><span>데이터</span><span>-</span></div>`);
+  const q=quotes[d.data.c];const dp=q&&q.dp!=null?q.dp:null;const price=q&&q.c!=null?q.c:null;const capText=formatCap(q&&q.cap!=null?q.cap:null);
+  tip.innerHTML=`<div class="t-sym">${d.data.n}</div><div class="t-name">${d.data.c}</div>`+(price!=null?`<div class="t-row"><span>현재가</span><span>${price.toLocaleString("ko-KR")}원</span></div>`:"")+(dp!=null?`<div class="t-row"><span>등락률</span><span style="color:${dp>=0?'#e0392b':'#1565c0'}">${dp>=0?'+':''}${dp.toFixed(2)}%</span></div>`:`<div class="t-row"><span>데이터</span><span>-</span></div>`)+(capText?`<div class="t-row"><span>시가총액</span><span>${capText}</span></div>`:"");
   tip.style.opacity=1;
   const r=chartEl.getBoundingClientRect();
   let x=event.clientX-r.left+12,y=event.clientY-r.top+12;
@@ -274,7 +295,8 @@ async function fetchBatch(codes){
   const dir=d.compareToPreviousPrice&&d.compareToPreviousPrice.code;
   if((dir==="4"||dir==="5")&&dp>0)dp=-dp;
   const price=toNumber(d.closePriceRaw!=null?d.closePriceRaw:d.closePrice);
-  out[d.itemCode]={c:price,dp};
+  const cap=toNumber(d.marketValueFullRaw!=null?d.marketValueFullRaw:d.marketValueFull);
+  out[d.itemCode]={c:price,dp,cap:Number.isNaN(cap)?null:cap};
  }
  return out;
 }
