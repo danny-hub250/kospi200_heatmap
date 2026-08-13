@@ -21,35 +21,66 @@ https://polling.finance.naver.com/api/realtime/domestic/stock/{종목코드1,종
 ```
 
 다만 이 엔드포인트는 `finance.naver.com` 외의 출처(origin)에서 브라우저로 직접
-호출하면 CORS 정책에 막힙니다. 그래서 공개 CORS 프록시를 앞단에 두고 호출하며,
+호출하면 CORS 정책에 막힙니다(실제로 확인됨: `No 'Access-Control-Allow-Origin'
+header is present`). 그래서 공개 CORS 프록시를 앞단에 두고 호출하며,
 `index.html` 상단의 `PROXY_BUILDERS` 배열에 다음 순서로 등록되어 있습니다. 하나가
-실패하면 자동으로 다음 프록시를 시도합니다.
+실패(또는 8초 타임아웃)하면 자동으로 다음 프록시를 시도합니다.
 
-1. `https://api.allorigins.win/raw?url=...`
-2. `https://corsproxy.io/?url=...`
-3. `https://thingproxy.freeboard.io/fetch/...`
+1. 프록시 없이 직접 호출 (위 이유로 항상 실패하지만 비용이 없어 그대로 둠)
+2. `https://api.codetabs.com/v1/proxy?quest=...`
+3. `https://api.allorigins.win/raw?url=...`
+4. `https://corsproxy.io/?url=...`
+5. `https://cors.eu.org/...`
 
 200여 종목을 한 번에 요청하면 URL이 너무 길어지므로 40종목씩 끊어서 순차적으로
 요청하고(배치 사이 350ms 대기), 5분마다 자동 새로고침합니다.
 
-### 프록시가 불안정하다면
+> **참고**: 처음에 등록했던 `thingproxy.freeboard.io`는 도메인 자체가 죽어서
+> (`ERR_NAME_NOT_RESOLVED`) 제거했고, `corsproxy.io`는 요청이 403으로 막히는
+> 경우가 관측되어 우선순위를 낮췄습니다. 무료 공개 CORS 프록시는 이렇게 예고 없이
+> 죽거나 막히는 일이 흔하므로, 아래 자체 프록시 설정을 강력히 권장합니다.
 
-무료 공개 CORS 프록시는 트래픽이 몰리면 느려지거나 일시적으로 죽을 수 있습니다.
-더 안정적으로 운영하려면 Cloudflare Workers, Vercel Edge Function 등으로 아주
-간단한 프록시를 직접 만들어 `PROXY_BUILDERS`에 추가하는 것을 권장합니다.
+### 가장 안정적인 방법: 나만의 프록시 만들기 (Cloudflare Workers, 무료)
 
-```js
-// Cloudflare Worker 예시
-export default {
-  async fetch(req) {
-    const target = new URL(req.url).searchParams.get("url");
-    const res = await fetch(target, { headers: { referer: "https://finance.naver.com/" } });
-    return new Response(res.body, {
-      headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
-    });
-  },
-};
-```
+공개 프록시는 데모 서비스라 트래픽이 몰리거나 운영자가 내리면 바로 죽습니다.
+5분 정도만 투자하면 무료로 훨씬 안정적인 나만의 프록시를 만들 수 있습니다.
+
+1. [dash.cloudflare.com](https://dash.cloudflare.com) 가입(무료) 후 로그인
+2. 왼쪽 메뉴 **Workers & Pages** → **Create** → **Create Worker**
+3. 이름 아무거나 입력(예: `kospi-proxy`) → **Deploy** (일단 기본 코드로 배포)
+4. 배포 후 **Edit code** 클릭, 아래 코드로 전체 교체 후 **Deploy**:
+
+   ```js
+   export default {
+     async fetch(req) {
+       const target = new URL(req.url).searchParams.get("url");
+       if (!target) return new Response("Missing url param", { status: 400 });
+       const res = await fetch(target, {
+         headers: { referer: "https://finance.naver.com/" },
+       });
+       return new Response(res.body, {
+         headers: {
+           "content-type": "application/json",
+           "access-control-allow-origin": "*",
+         },
+       });
+     },
+   };
+   ```
+
+5. Worker 상세 화면에 나오는 주소(`https://kospi-proxy.<계정>.workers.dev`)를 복사
+6. `index.html`의 `PROXY_BUILDERS` 배열 맨 앞에 아래처럼 한 줄 추가:
+
+   ```js
+   const PROXY_BUILDERS = [
+     u => u,
+     u => `https://kospi-proxy.<계정>.workers.dev/?url=${encodeURIComponent(u)}`, // 추가
+     u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+     // ... 기존 목록
+   ];
+   ```
+
+Cloudflare Workers 무료 플랜은 하루 10만 요청까지 무료라 이 정도 규모에는 충분합니다.
 
 다른 대안으로는 [한국투자증권 Open API](https://apiportal.koreainvestment.com/)
 (무료 가입, 앱키/시크릿 발급 후 REST API 제공)가 있는데, 이 경우 앱 시크릿을
@@ -62,7 +93,7 @@ export default {
 찍히는데, 어떤 프록시/엔드포인트가 실패했는지, HTTP 상태 코드나 타임아웃인지가
 그대로 남습니다. 공개 CORS 프록시는 언제든 죽거나 막힐 수 있으므로, 계속 실패한다면
 `PROXY_BUILDERS` 배열에 다른 프록시를 추가하거나 위에서 설명한 자체 프록시로
-교체하는 것을 권장합니다. 각 요청은 7초 타임아웃 후 다음 프록시로 자동 전환됩니다.
+교체하는 것을 권장합니다. 각 요청은 8초 타임아웃 후 다음 프록시로 자동 전환됩니다.
 
 ## 구성 종목 안내 (중요)
 
