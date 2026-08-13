@@ -22,43 +22,70 @@ https://polling.finance.naver.com/api/realtime/domestic/stock/{종목코드1,종
 
 다만 이 엔드포인트는 `finance.naver.com` 외의 출처(origin)에서 브라우저로 직접
 호출하면 CORS 정책에 막힙니다(실제로 확인됨: `No 'Access-Control-Allow-Origin'
-header is present`). 그래서 공개 CORS 프록시를 앞단에 두고 호출하며,
-`index.html` 상단의 `PROXY_BUILDERS` 배열에 다음 순서로 등록되어 있습니다. 하나가
-실패(또는 8초 타임아웃)하면 자동으로 다음 프록시를 시도합니다.
+header is present`). 공개 CORS 프록시(allorigins, corsproxy.io, thingproxy,
+codetabs, cors.eu.org)를 순서대로 다 시도해봤지만 전부 타임아웃/403/도메인
+만료로 실패해서, **자체 Cloudflare Worker 프록시를 기본값으로 사용**합니다.
+`index.html` 상단 `PROXY_BUILDERS` 배열에 다음 순서로 등록되어 있고, 하나가
+실패(또는 8초 타임아웃)하면 자동으로 다음 항목을 시도합니다.
 
-1. 프록시 없이 직접 호출 (위 이유로 항상 실패하지만 비용이 없어 그대로 둠)
-2. `https://api.codetabs.com/v1/proxy?quest=...`
-3. `https://api.allorigins.win/raw?url=...`
-4. `https://corsproxy.io/?url=...`
-5. `https://cors.eu.org/...`
+1. 자체 Cloudflare Worker 프록시 (기본값, 가장 안정적)
+2. 프록시 없이 직접 호출 (구조적으로 항상 CORS에 막히지만 비용이 없어 그대로 둠)
+3. `https://api.codetabs.com/v1/proxy?quest=...`
+4. `https://api.allorigins.win/raw?url=...`
+5. `https://corsproxy.io/?url=...`
+6. `https://cors.eu.org/...`
 
 200여 종목을 한 번에 요청하면 URL이 너무 길어지므로 40종목씩 끊어서 순차적으로
 요청하고(배치 사이 350ms 대기), 5분마다 자동 새로고침합니다.
 
-> **참고**: 처음에 등록했던 `thingproxy.freeboard.io`는 도메인 자체가 죽어서
-> (`ERR_NAME_NOT_RESOLVED`) 제거했고, `corsproxy.io`는 요청이 403으로 막히는
-> 경우가 관측되어 우선순위를 낮췄습니다. 무료 공개 CORS 프록시는 이렇게 예고 없이
-> 죽거나 막히는 일이 흔하므로, 아래 자체 프록시 설정을 강력히 권장합니다.
+### 실제 응답 형태
 
-### 가장 안정적인 방법: 나만의 프록시 만들기 (Cloudflare Workers, 무료)
+네이버 실시간 시세 엔드포인트는 아래와 같은 JSON을 돌려줍니다(문서화되어 있지
+않은 비공식 API라 `index.html`의 파싱 코드가 이 구조를 그대로 가정합니다).
 
-공개 프록시는 데모 서비스라 트래픽이 몰리거나 운영자가 내리면 바로 죽습니다.
-5분 정도만 투자하면 무료로 훨씬 안정적인 나만의 프록시를 만들 수 있습니다.
+```json
+{
+  "pollingInterval": 7000,
+  "datas": [
+    {
+      "itemCode": "005930",
+      "stockName": "삼성전자",
+      "closePriceRaw": "269500",
+      "fluctuationsRatioRaw": "5.48",
+      "compareToPreviousPrice": { "code": "2", "text": "상승", "name": "RISING" }
+    }
+  ],
+  "time": "20260813115350"
+}
+```
+
+`closePriceRaw`(현재가)와 `fluctuationsRatioRaw`(등락률)는 둘 다 부호 없는
+양수 문자열이라, 상승/하락은 `compareToPreviousPrice.code`로 판단해야 합니다
+(`1`=상한, `2`=상승, `3`=보합, `4`=하락, `5`=하한).
+
+### 자체 프록시 (Cloudflare Workers, 무료)
+
+공개 CORS 프록시는 데모 서비스라 트래픽이 몰리거나 운영자가 내리면 바로
+죽습니다. 이 프로젝트는 아래 코드로 만든 Cloudflare Worker를 기본 프록시로
+씁니다. 무료 플랜은 하루 10만 요청까지라 이 규모에는 충분합니다.
 
 1. [dash.cloudflare.com](https://dash.cloudflare.com) 가입(무료) 후 로그인
-2. 왼쪽 메뉴 **Workers & Pages** → **Create** → **Create Worker**
-3. 이름 아무거나 입력(예: `kospi-proxy`) → **Deploy** (일단 기본 코드로 배포)
-4. 배포 후 **Edit code** 클릭, 아래 코드로 전체 교체 후 **Deploy**:
+2. 왼쪽 메뉴 **Compute** → **Workers & Pages** → **Create** → **Create application**
+   → 기본(Hello World) 템플릿으로 배포
+3. **Edit code**에서 아래 코드로 전체 교체 후 **Deploy**:
 
    ```js
    export default {
-     async fetch(req) {
-       const target = new URL(req.url).searchParams.get("url");
-       if (!target) return new Response("Missing url param", { status: 400 });
-       const res = await fetch(target, {
+     async fetch(request) {
+       const target = new URL(request.url).searchParams.get("url");
+       if (!target) {
+         return new Response("Missing url param", { status: 400 });
+       }
+       const upstream = await fetch(target, {
          headers: { referer: "https://finance.naver.com/" },
        });
-       return new Response(res.body, {
+       return new Response(upstream.body, {
+         status: upstream.status,
          headers: {
            "content-type": "application/json",
            "access-control-allow-origin": "*",
@@ -68,19 +95,18 @@ header is present`). 그래서 공개 CORS 프록시를 앞단에 두고 호출�
    };
    ```
 
-5. Worker 상세 화면에 나오는 주소(`https://kospi-proxy.<계정>.workers.dev`)를 복사
-6. `index.html`의 `PROXY_BUILDERS` 배열 맨 앞에 아래처럼 한 줄 추가:
+4. Worker 주소(`https://<이름>.<계정>.workers.dev`)를 `index.html`의
+   `PROXY_BUILDERS` 배열 맨 앞에 등록:
 
    ```js
    const PROXY_BUILDERS = [
-     u => u,
-     u => `https://kospi-proxy.<계정>.workers.dev/?url=${encodeURIComponent(u)}`, // 추가
-     u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-     // ... 기존 목록
+     u => `https://<이름>.<계정>.workers.dev/?url=${encodeURIComponent(u)}`,
+     // ... 나머지 폴백 목록
    ];
    ```
 
-Cloudflare Workers 무료 플랜은 하루 10만 요청까지 무료라 이 정도 규모에는 충분합니다.
+본인 계정으로 새로 만들 경우, 자동 생성된 이름(`patient-art-2f09` 같은 임의
+문자열)이어도 상관없습니다 — 주소만 정확히 넣으면 됩니다.
 
 다른 대안으로는 [한국투자증권 Open API](https://apiportal.koreainvestment.com/)
 (무료 가입, 앱키/시크릿 발급 후 REST API 제공)가 있는데, 이 경우 앱 시크릿을
