@@ -86,6 +86,7 @@
  * ---------------------------------------------------------------------- */
 
 const PROXY_BUILDERS = [
+  u => u, // 직접 호출(브라우저/환경에 따라 CORS가 열려 있으면 프록시 없이 바로 성공)
   u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
   u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
   u => `https://thingproxy.freeboard.io/fetch/${u}`,
@@ -218,15 +219,30 @@ function render(quotes){
 
 function setStatus(cls){document.getElementById("dot").className="dot"+(cls?" "+cls:"");}
 
+// 프록시 응답이 오지 않고 계속 붙잡고 있는 경우를 대비해 요청마다 타임아웃을 건다.
+async function fetchWithTimeout(url,ms){
+ const ctrl=new AbortController();
+ const timer=setTimeout(()=>ctrl.abort(),ms);
+ try{
+  return await fetch(url,{cache:"no-store",signal:ctrl.signal});
+ }finally{
+  clearTimeout(timer);
+ }
+}
+
 async function fetchViaProxy(targetUrl){
  let lastErr;
  for(const build of PROXY_BUILDERS){
+  const reqUrl=build(targetUrl);
   try{
-   const res=await fetch(build(targetUrl),{cache:"no-store"});
+   const res=await fetchWithTimeout(reqUrl,7000);
    if(!res.ok)throw new Error("HTTP "+res.status);
    const data=await res.json();
    if(data)return data;
-  }catch(e){lastErr=e;}
+  }catch(e){
+   lastErr=e;
+   console.warn("[KOSPI200] 요청 실패:",reqUrl,e&&e.message?e.message:e);
+  }
  }
  throw lastErr||new Error("모든 프록시 호출 실패");
 }
@@ -260,12 +276,18 @@ async function loadAll(){
    const res=await fetchBatch(batch);
    Object.assign(quotes,res);
    failed+=batch.filter(c=>!res[c]).length;
-  }catch(e){failed+=batch.length;}
+  }catch(e){failed+=batch.length;console.warn("[KOSPI200] 배치 실패:",batch,e&&e.message?e.message:e);}
   render(quotes);
   if(i+batchSize<codes.length)await new Promise(r=>setTimeout(r,delayMs));
  }
- document.getElementById("lastUpdate").textContent=new Date().toLocaleTimeString("ko-KR")+(failed?` (${failed} 실패)`:"");
- setStatus(failed>STOCKS.length*0.5?"err":"live");
+ const time=new Date().toLocaleTimeString("ko-KR");
+ if(failed>=STOCKS.length){
+  document.getElementById("lastUpdate").textContent=`${time} 시세 조회 실패 (콘솔 로그 확인)`;
+  setStatus("err");
+ }else{
+  document.getElementById("lastUpdate").textContent=time+(failed?` (${failed} 실패)`:"");
+  setStatus(failed>STOCKS.length*0.5?"err":"live");
+ }
 }
 
 function initDate(){
