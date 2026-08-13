@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="KOSPI200">
+<meta name="theme-color" content="#0a0a0c">
+<title>KOSPI 200 Heatmap</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<style>
+  :root{--bg:#0a0a0c;--panel:#141418;--border:#26262e;--text:#e8e8ec;--muted:#7a7a86;--accent:#e0392b;}
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;}
+  body{
+    background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+    display:flex;flex-direction:column;overflow:hidden;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--border);background:var(--panel);flex-shrink:0;flex-wrap:wrap;}
+  header .brand{font-weight:700;font-size:14px;letter-spacing:.02em;white-space:nowrap;}
+  header .brand span{color:var(--accent);}
+  header .date{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  header .market{font-size:10px;padding:2px 7px;border-radius:20px;border:1px solid var(--border);color:var(--muted);white-space:nowrap;}
+  header .market.open{color:#2ecc71;border-color:#2ecc71;}
+  header .status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);}
+  header .dot{width:8px;height:8px;border-radius:50%;background:#444;transition:background .3s;flex-shrink:0;}
+  header .dot.live{background:#2ecc71;box-shadow:0 0 6px #2ecc71;animation:pulse 2s infinite;}
+  header .dot.err{background:#e74c3c;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+  header button{background:transparent;border:1px solid var(--border);color:var(--text);padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;min-height:34px;}
+  header button:active{background:#22222a;}
+  #chart{flex:1;position:relative;overflow:hidden;}
+  svg{display:block;width:100%;height:100%;}
+  .sector-label{fill:rgba(255,255,255,.72);font-size:11px;font-weight:700;letter-spacing:.05em;pointer-events:none;}
+  .cell{cursor:pointer;}
+  .cell text{pointer-events:none;}
+  #tip{position:absolute;pointer-events:none;background:rgba(15,15,20,.97);border:1px solid var(--border);border-radius:10px;padding:11px 13px;font-size:13px;opacity:0;transition:opacity .12s;box-shadow:0 8px 28px rgba(0,0,0,.6);z-index:10;min-width:150px;}
+  #tip .t-sym{font-weight:700;font-size:15px;}
+  #tip .t-name{color:var(--muted);font-size:11px;margin-bottom:7px;}
+  #tip .t-row{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums;}
+  #tip .t-row span:last-child{font-weight:600;}
+  footer{display:flex;align-items:center;gap:6px;padding:8px 14px;border-top:1px solid var(--border);background:var(--panel);font-size:11px;color:var(--muted);flex-shrink:0;flex-wrap:wrap;}
+  .legend-bar{display:flex;height:12px;border-radius:3px;overflow:hidden;}
+  .legend-bar div{width:22px;}
+  #lastUpdate{margin-left:auto;text-align:right;font-variant-numeric:tabular-nums;}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">KOSPI <span>200</span> HEATMAP</div>
+    <div class="date" id="date"></div>
+    <div class="market" id="market">-</div>
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <button id="refresh">새로고침</button>
+    </div>
+  </header>
+  <div id="chart"><div id="tip"></div></div>
+  <footer>
+    <span>-4%</span>
+    <div class="legend-bar" id="legendBar"></div>
+    <span>+4%</span>
+    <span id="lastUpdate">대기 중</span>
+  </footer>
+<script>
+/* ------------------------------------------------------------------------
+ * KOSPI 200 Heatmap
+ *
+ * 데이터 소스: 네이버페이 증권의 공개 시세 조회 API
+ *   https://polling.finance.naver.com/api/realtime/domestic/stock/{code1,code2,...}
+ * 별도의 API 키가 필요 없는 무료 엔드포인트지만, 브라우저에서 직접 호출하면
+ * CORS 정책에 막히기 때문에 공개 CORS 프록시를 경유해서 호출합니다.
+ * 프록시는 아래 PROXY_BUILDERS 배열에 여러 개를 등록해두고 앞에서부터 순서대로
+ * 시도하다가 실패하면 다음 프록시로 넘어갑니다.
+ *
+ * 구성 종목: KOSPI 200 지수의 실제 편입 종목은 KRX가 반기(6월/12월)마다
+ * 재조정합니다. 아래 STOCKS 목록은 시가총액 상위 종목 위주로 구성한
+ * "KOSPI 200 대표 종목" 집합(135종목)이며, 최신 공식 편입 종목/비중과
+ * 완전히 일치하지는 않을 수 있습니다. 정확한 최신 구성종목이 필요하면
+ * KRX 정보데이터시스템(data.krx.co.kr)에서 다운로드한 목록으로
+ * STOCKS 배열을 교체하세요. weight 값은 트리맵 크기 배분을 위한
+ * 대략적인 상대값이며 실시간 시가총액이 아닙니다.
+ * ---------------------------------------------------------------------- */
+
+const PROXY_BUILDERS = [
+  u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+  u => `https://thingproxy.freeboard.io/fetch/${u}`,
+];
+
+const STOCKS=[
+ // 반도체·IT
+ {c:"005930",n:"삼성전자",sector:"반도체·IT",w:300},{c:"000660",n:"SK하이닉스",sector:"반도체·IT",w:140},
+ {c:"066570",n:"LG전자",sector:"반도체·IT",w:18},{c:"034220",n:"LG디스플레이",sector:"반도체·IT",w:8},
+ {c:"009150",n:"삼성전기",sector:"반도체·IT",w:10},{c:"018260",n:"삼성에스디에스",sector:"반도체·IT",w:9},
+ {c:"042700",n:"한미반도체",sector:"반도체·IT",w:10},{c:"011070",n:"LG이노텍",sector:"반도체·IT",w:7},
+ {c:"000990",n:"DB하이텍",sector:"반도체·IT",w:4},{c:"240810",n:"원익IPS",sector:"반도체·IT",w:3},
+ // 인터넷·게임·엔터·미디어
+ {c:"035420",n:"NAVER",sector:"인터넷·게임·엔터",w:45},{c:"035720",n:"카카오",sector:"인터넷·게임·엔터",w:25},
+ {c:"036570",n:"엔씨소프트",sector:"인터넷·게임·엔터",w:8},{c:"259960",n:"크래프톤",sector:"인터넷·게임·엔터",w:16},
+ {c:"251270",n:"넷마블",sector:"인터넷·게임·엔터",w:6},{c:"293490",n:"카카오게임즈",sector:"인터넷·게임·엔터",w:4},
+ {c:"352820",n:"하이브",sector:"인터넷·게임·엔터",w:14},{c:"041510",n:"에스엠",sector:"인터넷·게임·엔터",w:4},
+ {c:"122870",n:"와이지엔터테인먼트",sector:"인터넷·게임·엔터",w:3},{c:"035900",n:"JYP Ent.",sector:"인터넷·게임·엔터",w:5},
+ {c:"377300",n:"카카오페이",sector:"인터넷·게임·엔터",w:5},{c:"323410",n:"카카오뱅크",sector:"인터넷·게임·엔터",w:18},
+ {c:"030000",n:"제일기획",sector:"인터넷·게임·엔터",w:4},{c:"214320",n:"이노션",sector:"인터넷·게임·엔터",w:3},
+ // 자동차·부품
+ {c:"005380",n:"현대차",sector:"자동차·부품",w:50},{c:"000270",n:"기아",sector:"자동차·부품",w:42},
+ {c:"012330",n:"현대모비스",sector:"자동차·부품",w:20},{c:"204320",n:"만도",sector:"자동차·부품",w:4},
+ {c:"011210",n:"현대위아",sector:"자동차·부품",w:4},{c:"018880",n:"한온시스템",sector:"자동차·부품",w:3},
+ // 2차전지·화학
+ {c:"373220",n:"LG에너지솔루션",sector:"2차전지·화학",w:65},{c:"006400",n:"삼성SDI",sector:"2차전지·화학",w:22},
+ {c:"051910",n:"LG화학",sector:"2차전지·화학",w:22},{c:"096770",n:"SK이노베이션",sector:"2차전지·화학",w:13},
+ {c:"011170",n:"롯데케미칼",sector:"2차전지·화학",w:5},{c:"009830",n:"한화솔루션",sector:"2차전지·화학",w:9},
+ {c:"010060",n:"OCI홀딩스",sector:"2차전지·화학",w:4},{c:"247540",n:"에코프로비엠",sector:"2차전지·화학",w:9},
+ {c:"086520",n:"에코프로",sector:"2차전지·화학",w:10},{c:"003670",n:"포스코퓨처엠",sector:"2차전지·화학",w:10},
+ {c:"361610",n:"SK아이이테크놀로지",sector:"2차전지·화학",w:3},{c:"011780",n:"금호석유화학",sector:"2차전지·화학",w:4},
+ {c:"004000",n:"롯데정밀화학",sector:"2차전지·화학",w:2},{c:"011790",n:"SKC",sector:"2차전지·화학",w:3},
+ // 철강·소재
+ {c:"005490",n:"POSCO홀딩스",sector:"철강·소재",w:28},{c:"004020",n:"현대제철",sector:"철강·소재",w:7},
+ {c:"010130",n:"고려아연",sector:"철강·소재",w:11},{c:"000670",n:"영풍",sector:"철강·소재",w:2},
+ {c:"003410",n:"쌍용C&E",sector:"철강·소재",w:3},
+ // 바이오·헬스케어
+ {c:"207940",n:"삼성바이오로직스",sector:"바이오·헬스케어",w:50},{c:"068270",n:"셀트리온",sector:"바이오·헬스케어",w:28},
+ {c:"326030",n:"SK바이오팜",sector:"바이오·헬스케어",w:7},{c:"302440",n:"SK바이오사이언스",sector:"바이오·헬스케어",w:3},
+ {c:"128940",n:"한미약품",sector:"바이오·헬스케어",w:5},{c:"000100",n:"유한양행",sector:"바이오·헬스케어",w:5},
+ {c:"185750",n:"종근당",sector:"바이오·헬스케어",w:3},{c:"069620",n:"대웅제약",sector:"바이오·헬스케어",w:3},
+ {c:"145020",n:"휴젤",sector:"바이오·헬스케어",w:3},
+ // 금융
+ {c:"105560",n:"KB금융",sector:"금융",w:32},{c:"055550",n:"신한지주",sector:"금융",w:28},
+ {c:"086790",n:"하나금융지주",sector:"금융",w:18},{c:"316140",n:"우리금융지주",sector:"금융",w:11},
+ {c:"138930",n:"BNK금융지주",sector:"금융",w:3},{c:"024110",n:"기업은행",sector:"금융",w:7},
+ {c:"032830",n:"삼성생명",sector:"금융",w:9},{c:"000810",n:"삼성화재",sector:"금융",w:9},
+ {c:"138040",n:"메리츠금융지주",sector:"금융",w:13},{c:"029780",n:"삼성카드",sector:"금융",w:3},
+ {c:"071050",n:"한국금융지주",sector:"금융",w:5},{c:"006800",n:"미래에셋증권",sector:"금융",w:5},
+ {c:"016360",n:"삼성증권",sector:"금융",w:4},{c:"039490",n:"키움증권",sector:"금융",w:5},
+ {c:"005830",n:"DB손해보험",sector:"금융",w:7},{c:"005940",n:"NH투자증권",sector:"금융",w:4},
+ {c:"088350",n:"한화생명",sector:"금융",w:3},{c:"001450",n:"현대해상",sector:"금융",w:3},
+ {c:"175330",n:"JB금융지주",sector:"금융",w:2},
+ // 통신
+ {c:"017670",n:"SK텔레콤",sector:"통신",w:18},{c:"030200",n:"KT",sector:"통신",w:11},
+ {c:"032640",n:"LG유플러스",sector:"통신",w:7},
+ // 지주·복합
+ {c:"003550",n:"LG",sector:"지주·복합",w:11},{c:"034730",n:"SK",sector:"지주·복합",w:13},
+ {c:"000880",n:"한화",sector:"지주·복합",w:5},{c:"078930",n:"GS",sector:"지주·복합",w:7},
+ {c:"001040",n:"CJ",sector:"지주·복합",w:4},{c:"004990",n:"롯데지주",sector:"지주·복합",w:4},
+ {c:"402340",n:"SK스퀘어",sector:"지주·복합",w:7},{c:"006260",n:"LS",sector:"지주·복합",w:4},
+ {c:"000150",n:"두산",sector:"지주·복합",w:3},{c:"004800",n:"효성",sector:"지주·복합",w:3},
+ {c:"002790",n:"아모레G",sector:"지주·복합",w:2},{c:"001800",n:"오리온홀딩스",sector:"지주·복합",w:2},
+ {c:"000210",n:"DL홀딩스",sector:"지주·복합",w:2},
+ // 유통·소비재
+ {c:"139480",n:"이마트",sector:"유통·소비재",w:4},{c:"282330",n:"BGF리테일",sector:"유통·소비재",w:3},
+ {c:"023530",n:"롯데쇼핑",sector:"유통·소비재",w:4},{c:"097950",n:"CJ제일제당",sector:"유통·소비재",w:7},
+ {c:"090430",n:"아모레퍼시픽",sector:"유통·소비재",w:7},{c:"051900",n:"LG생활건강",sector:"유통·소비재",w:7},
+ {c:"161390",n:"한국타이어앤테크놀로지",sector:"유통·소비재",w:4},{c:"271560",n:"오리온",sector:"유통·소비재",w:6},
+ {c:"033780",n:"KT&G",sector:"유통·소비재",w:11},{c:"007070",n:"GS리테일",sector:"유통·소비재",w:3},
+ {c:"004170",n:"신세계",sector:"유통·소비재",w:4},{c:"069960",n:"현대백화점",sector:"유통·소비재",w:3},
+ {c:"000120",n:"CJ대한통운",sector:"유통·소비재",w:3},{c:"021240",n:"코웨이",sector:"유통·소비재",w:4},
+ {c:"006040",n:"동원산업",sector:"유통·소비재",w:3},
+ // 조선·기계·건설
+ {c:"009540",n:"HD한국조선해양",sector:"조선·기계·건설",w:16},{c:"042660",n:"한화오션",sector:"조선·기계·건설",w:8},
+ {c:"010140",n:"삼성중공업",sector:"조선·기계·건설",w:4},{c:"267250",n:"HD현대",sector:"조선·기계·건설",w:8},
+ {c:"034020",n:"두산에너빌리티",sector:"조선·기계·건설",w:10},{c:"012450",n:"한화에어로스페이스",sector:"조선·기계·건설",w:20},
+ {c:"064350",n:"현대로템",sector:"조선·기계·건설",w:6},{c:"000720",n:"현대건설",sector:"조선·기계·건설",w:6},
+ {c:"006360",n:"GS건설",sector:"조선·기계·건설",w:3},{c:"028050",n:"삼성엔지니어링",sector:"조선·기계·건설",w:4},
+ {c:"010120",n:"LS ELECTRIC",sector:"조선·기계·건설",w:6},{c:"241560",n:"두산밥캣",sector:"조선·기계·건설",w:5},
+ {c:"298040",n:"효성중공업",sector:"조선·기계·건설",w:3},{c:"001440",n:"대한전선",sector:"조선·기계·건설",w:2},
+ {c:"010620",n:"현대미포조선",sector:"조선·기계·건설",w:3},
+ // 운송·상사
+ {c:"003490",n:"대한항공",sector:"운송·상사",w:8},{c:"180640",n:"한진칼",sector:"운송·상사",w:3},
+ {c:"047050",n:"포스코인터내셔널",sector:"운송·상사",w:4},{c:"011200",n:"HMM",sector:"운송·상사",w:7},
+ {c:"086280",n:"현대글로비스",sector:"운송·상사",w:8},
+ // 에너지·유틸리티
+ {c:"015760",n:"한국전력",sector:"에너지·유틸리티",w:7},{c:"036460",n:"한국가스공사",sector:"에너지·유틸리티",w:3},
+ {c:"010950",n:"S-Oil",sector:"에너지·유틸리티",w:10},{c:"051600",n:"한전KPS",sector:"에너지·유틸리티",w:2},
+ {c:"052690",n:"한전기술",sector:"에너지·유틸리티",w:2},{c:"088980",n:"맥쿼리인프라",sector:"에너지·유틸리티",w:2},
+ {c:"336260",n:"두산퓨얼셀",sector:"에너지·유틸리티",w:2},
+];
+
+// 상승=빨강, 하락=파랑 (국내 증시 관례)
+const colorScale=d3.scaleLinear().domain([-4,-1.5,0,1.5,4]).range(["#1565c0","#1b3a5c","#2b2b30","#7a2320","#e0392b"]).clamp(true);
+(function(){const bar=document.getElementById("legendBar");for(let p=-4;p<=4;p+=2/3){const d=document.createElement("div");d.style.background=colorScale(p);bar.appendChild(d);}})();
+
+const tip=document.getElementById("tip"),chartEl=document.getElementById("chart");
+let tipTimer=null;
+
+function render(quotes){
+ const w=chartEl.clientWidth,h=chartEl.clientHeight;
+ const portrait = h > w;
+ d3.select("#chart svg").remove();
+ const svg=d3.select("#chart").append("svg").attr("width",w).attr("height",h);
+ const bySector=d3.group(STOCKS,d=>d.sector);
+ const root=d3.hierarchy({children:Array.from(bySector,([sector,items])=>({sector,children:items}))}).sum(d=>d.w).sort((a,b)=>b.value-a.value);
+ d3.treemap()
+   .tile(portrait ? d3.treemapSliceDice : d3.treemapSquarify)
+   .size([w,h]).paddingOuter(4).paddingTop(20).paddingInner(1.5).round(true)(root);
+ svg.selectAll(".sector-label").data(root.children).join("text").attr("class","sector-label").attr("x",d=>d.x0+5).attr("y",d=>d.y0+13).text(d=>d.data.sector);
+ const cell=svg.selectAll(".cell").data(root.leaves()).join("g").attr("class","cell").attr("transform",d=>`translate(${d.x0},${d.y0})`);
+ cell.append("rect").attr("width",d=>Math.max(0,d.x1-d.x0)).attr("height",d=>Math.max(0,d.y1-d.y0)).attr("rx",2).attr("fill",d=>{const q=quotes[d.data.c];return(q&&q.dp!=null)?colorScale(q.dp):"#2b2b30";}).attr("stroke","rgba(0,0,0,0.35)").attr("stroke-width",1);
+ cell.each(function(d){const bw=d.x1-d.x0,bh=d.y1-d.y0;if(bw<28||bh<16)return;const q=quotes[d.data.c];const dp=(q&&q.dp!=null)?q.dp:null;const g=d3.select(this);const fs=Math.max(9,Math.min(bw/4.6,bh/3,20));
+  g.append("text").attr("x",bw/2).attr("y",bh/2-(bh>32?fs*0.25:0)).attr("text-anchor","middle").attr("dominant-baseline","middle").attr("fill","#fff").attr("font-weight",700).attr("font-size",fs).text(d.data.n);
+  if(bh>32&&dp!=null){g.append("text").attr("x",bw/2).attr("y",bh/2+fs*0.75).attr("text-anchor","middle").attr("dominant-baseline","middle").attr("fill","rgba(255,255,255,0.85)").attr("font-size",Math.max(8,fs*0.5)).text((dp>=0?"+":"")+dp.toFixed(2)+"%");}});
+ cell.on("click",function(event,d){
+  const q=quotes[d.data.c];const dp=q&&q.dp!=null?q.dp:null;const price=q&&q.c!=null?q.c:null;
+  tip.innerHTML=`<div class="t-sym">${d.data.n}</div><div class="t-name">${d.data.c}</div>`+(price!=null?`<div class="t-row"><span>현재가</span><span>${price.toLocaleString("ko-KR")}원</span></div>`:"")+(dp!=null?`<div class="t-row"><span>등락률</span><span style="color:${dp>=0?'#e0392b':'#1565c0'}">${dp>=0?'+':''}${dp.toFixed(2)}%</span></div>`:`<div class="t-row"><span>데이터</span><span>-</span></div>`);
+  tip.style.opacity=1;
+  const r=chartEl.getBoundingClientRect();
+  let x=event.clientX-r.left+12,y=event.clientY-r.top+12;
+  const tw=tip.offsetWidth,th=tip.offsetHeight;
+  if(x+tw>r.width)x=event.clientX-r.left-tw-12;
+  if(y+th>r.height)y=event.clientY-r.top-th-12;
+  tip.style.left=Math.max(4,x)+"px";tip.style.top=Math.max(4,y)+"px";
+  clearTimeout(tipTimer);tipTimer=setTimeout(()=>{tip.style.opacity=0;},2500);
+ });
+}
+
+function setStatus(cls){document.getElementById("dot").className="dot"+(cls?" "+cls:"");}
+
+async function fetchViaProxy(targetUrl){
+ let lastErr;
+ for(const build of PROXY_BUILDERS){
+  try{
+   const res=await fetch(build(targetUrl),{cache:"no-store"});
+   if(!res.ok)throw new Error("HTTP "+res.status);
+   const data=await res.json();
+   if(data)return data;
+  }catch(e){lastErr=e;}
+ }
+ throw lastErr||new Error("모든 프록시 호출 실패");
+}
+
+async function fetchBatch(codes){
+ const url=`https://polling.finance.naver.com/api/realtime/domestic/stock/${codes.join(",")}`;
+ const data=await fetchViaProxy(url);
+ const out={};
+ const areas=(data&&data.result&&data.result.areas)||[];
+ for(const area of areas){
+  for(const d of (area.datas||[])){
+   if(!d||!d.cd)continue;
+   let dp=typeof d.cr==="number"?d.cr:parseFloat(d.cr);
+   if(Number.isNaN(dp))continue;
+   // rf: 1=상한,2=상승,3=보합,4=하락,5=하한 — cr 부호가 없을 경우를 대비한 방어 로직
+   if((d.rf==="4"||d.rf==="5")&&dp>0)dp=-dp;
+   out[d.cd]={c:typeof d.nv==="number"?d.nv:parseFloat(d.nv),dp};
+  }
+ }
+ return out;
+}
+
+const quotes={};
+async function loadAll(){
+ document.getElementById("lastUpdate").textContent="불러오는 중…";setStatus("live");
+ const batchSize=40,delayMs=350;let failed=0;
+ const codes=STOCKS.map(s=>s.c);
+ for(let i=0;i<codes.length;i+=batchSize){
+  const batch=codes.slice(i,i+batchSize);
+  try{
+   const res=await fetchBatch(batch);
+   Object.assign(quotes,res);
+   failed+=batch.filter(c=>!res[c]).length;
+  }catch(e){failed+=batch.length;}
+  render(quotes);
+  if(i+batchSize<codes.length)await new Promise(r=>setTimeout(r,delayMs));
+ }
+ document.getElementById("lastUpdate").textContent=new Date().toLocaleTimeString("ko-KR")+(failed?` (${failed} 실패)`:"");
+ setStatus(failed>STOCKS.length*0.5?"err":"live");
+}
+
+function initDate(){
+ const d=new Date();const days=["일","월","화","수","목","금","토"];
+ document.getElementById("date").textContent=`${d.getMonth()+1}/${d.getDate()} ${days[d.getDay()]}`;
+ const kst=new Date(d.toLocaleString("en-US",{timeZone:"Asia/Seoul"}));
+ const day=kst.getDay(),mins=kst.getHours()*60+kst.getMinutes();
+ const isWeekday=day>=1&&day<=5;
+ const open=isWeekday&&mins>=9*60&&mins<=15*60+30;
+ const el=document.getElementById("market");
+ el.textContent=open?"장중":"장마감";
+ el.className="market"+(open?" open":"");
+}
+
+initDate();render(quotes);loadAll();
+document.getElementById("refresh").addEventListener("click",loadAll);
+let rt;window.addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(()=>render(quotes),150);});
+window.addEventListener("orientationchange",()=>{setTimeout(()=>render(quotes),300);});
+setInterval(loadAll,5*60*1000);
+setInterval(initDate,60*1000);
+</script>
+</body>
+</html>
