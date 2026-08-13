@@ -86,14 +86,14 @@
  * ---------------------------------------------------------------------- */
 
 const PROXY_BUILDERS = [
-  u => u, // 직접 호출(브라우저/환경에 따라 CORS가 열려 있으면 프록시 없이 바로 성공)
+  // 자체 Cloudflare Worker 프록시 (가장 안정적 — 공개 데모 프록시들은 타임아웃/403으로
+  // 계속 막혀서 이걸 기본으로 사용한다. README 참고)
+  u => `https://patient-art-2f09.jkfreerun.workers.dev/?url=${encodeURIComponent(u)}`,
+  u => u, // 직접 호출(환경에 따라 CORS가 열려 있으면 프록시 없이도 성공)
   u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
   u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
   u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
   u => `https://cors.eu.org/${u}`,
-  // 위 공개 프록시들은 무료 데모 서비스라 예고 없이 막히거나 다운될 수 있다.
-  // 계속 실패하면 README의 안내대로 Cloudflare Worker 등으로 직접 프록시를 만들어
-  // 이 배열 맨 앞에 추가하는 것이 가장 안정적이다.
 ];
 
 const STOCKS=[
@@ -251,20 +251,30 @@ async function fetchViaProxy(targetUrl){
  throw lastErr||new Error("모든 프록시 호출 실패");
 }
 
+// 실제 응답 형태(2026-08 기준, Worker로 직접 확인):
+// { "pollingInterval":7000, "datas":[ { "itemCode":"005930",
+//   "closePriceRaw":"269500", "fluctuationsRatioRaw":"5.48",
+//   "compareToPreviousPrice":{"code":"2","text":"상승","name":"RISING"}, ... } ], "time":"..." }
+// code: 1=상한,2=상승,3=보합,4=하락,5=하한. fluctuationsRatioRaw/closePriceRaw 자체에는
+// 부호가 없어서(항상 양수 문자열) compareToPreviousPrice.code로 상승/하락을 판단해야 한다.
+function toNumber(v){
+ if(typeof v==="number")return v;
+ if(typeof v==="string")return parseFloat(v.replace(/,/g,""));
+ return NaN;
+}
 async function fetchBatch(codes){
  const url=`https://polling.finance.naver.com/api/realtime/domestic/stock/${codes.join(",")}`;
  const data=await fetchViaProxy(url);
  const out={};
- const areas=(data&&data.result&&data.result.areas)||[];
- for(const area of areas){
-  for(const d of (area.datas||[])){
-   if(!d||!d.cd)continue;
-   let dp=typeof d.cr==="number"?d.cr:parseFloat(d.cr);
-   if(Number.isNaN(dp))continue;
-   // rf: 1=상한,2=상승,3=보합,4=하락,5=하한 — cr 부호가 없을 경우를 대비한 방어 로직
-   if((d.rf==="4"||d.rf==="5")&&dp>0)dp=-dp;
-   out[d.cd]={c:typeof d.nv==="number"?d.nv:parseFloat(d.nv),dp};
-  }
+ const items=(data&&data.datas)||[];
+ for(const d of items){
+  if(!d||!d.itemCode)continue;
+  let dp=toNumber(d.fluctuationsRatioRaw!=null?d.fluctuationsRatioRaw:d.fluctuationsRatio);
+  if(Number.isNaN(dp))continue;
+  const dir=d.compareToPreviousPrice&&d.compareToPreviousPrice.code;
+  if((dir==="4"||dir==="5")&&dp>0)dp=-dp;
+  const price=toNumber(d.closePriceRaw!=null?d.closePriceRaw:d.closePrice);
+  out[d.itemCode]={c:price,dp};
  }
  return out;
 }
